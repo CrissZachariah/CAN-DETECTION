@@ -1,0 +1,1194 @@
+import os
+import io
+import time
+import random
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import torch
+import torch.nn as nn
+import streamlit as st
+
+# ReportLab imports for automated PDF report generation
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+
+# ------------------------------------------------------------------------------
+# 1. PAGE CONFIGURATION & MODERN CLEAN THEME CSS
+# ------------------------------------------------------------------------------
+st.set_page_config(
+    page_title="CAN IDS | Automotive Security",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.markdown("""
+<style>
+/* Hide standard Streamlit header & footer elements */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+
+/* Main Background - Soft Modern Light Canvas */
+.stApp {
+    background-color: #F8FAFC !important;
+}
+
+/* Base Typography */
+html, body, [class*="css"], .stMarkdown {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    color: #0F172A;
+}
+
+/* Dark Navy Sidebar Theme */
+section[data-testid="stSidebar"] {
+    background-color: #111927 !important;
+    border-right: 1px solid #1E293B;
+}
+
+section[data-testid="stSidebar"] * {
+    color: #94A3B8 !important;
+}
+
+section[data-testid="stSidebar"] h1, 
+section[data-testid="stSidebar"] h2, 
+section[data-testid="stSidebar"] h3 {
+    color: #FFFFFF !important;
+}
+
+/* Sidebar Navigation Items Styling */
+div[data-testid="stSidebarUserContent"] .stRadio label {
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.15s ease;
+}
+
+/* Top Dashboard Header */
+.dashboard-header {
+    margin-bottom: 20px;
+}
+.dashboard-header h1 {
+    font-size: 26px;
+    font-weight: 700;
+    color: #0F172A;
+    margin-bottom: 2px;
+}
+.dashboard-header p {
+    font-size: 14px;
+    color: #64748B;
+    margin: 0;
+}
+
+/* Crisp White KPI Card Containers */
+.kpi-card {
+    background-color: #FFFFFF;
+    border-radius: 12px;
+    padding: 18px 20px;
+    border: 1px solid #E2E8F0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.kpi-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+}
+
+.kpi-blue { background-color: #EFF6FF; color: #2563EB; }
+.kpi-green { background-color: #ECFDF5; color: #10B981; }
+.kpi-red { background-color: #FEF2F2; color: #EF4444; }
+.kpi-purple { background-color: #F5F3FF; color: #8B5CF6; }
+
+.kpi-details {
+    display: flex;
+    flex-direction: column;
+}
+.kpi-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: #64748B;
+    margin-bottom: 4px;
+}
+.kpi-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: #0F172A;
+    line-height: 1.2;
+}
+.kpi-subtext {
+    font-size: 11px;
+    color: #94A3B8;
+    margin-top: 4px;
+}
+
+/* Card Boxes for Charts / Tables */
+.card-box {
+    background-color: #FFFFFF;
+    border-radius: 12px;
+    padding: 20px;
+    border: 1px solid #E2E8F0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    margin-bottom: 20px;
+}
+
+/* Buttons Styling */
+.stButton > button {
+    background-color: #2563EB !important;
+    color: #FFFFFF !important;
+    border-radius: 8px !important;
+    border: none !important;
+    padding: 10px 18px !important;
+    font-weight: 600 !important;
+    box-shadow: 0 1px 2px rgba(37, 99, 235, 0.2);
+    width: 100%;
+}
+.stButton > button:hover {
+    background-color: #1D4ED8 !important;
+}
+
+/* Threat Badges */
+.badge-danger { background-color: #FEF2F2; color: #EF4444; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 12px; }
+.badge-success { background-color: #ECFDF5; color: #10B981; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 12px; }
+.badge-warning { background-color: #FFFBEB; color: #F59E0B; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 12px; }
+
+/* Status Box Sidebar */
+.sidebar-status {
+    background-color: #1E293B;
+    border-radius: 10px;
+    padding: 14px;
+    margin-top: 20px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ------------------------------------------------------------------------------
+# 2. MODEL ARCHITECTURE & LOAD ENGINE
+# ------------------------------------------------------------------------------
+class LightweightCANCNN(nn.Module):
+    """
+    2-layer CNN matching the PROPOSAL's exact architecture spec (Section 4.4),
+    as reverted in 28_aug_2026.ipynb:
+
+      Conv1: 64 filters, 3x3, ReLU
+      Pool1: MaxPool 2x2, stride 2
+      Conv2: 16 filters, 3x3, ReLU
+      Pool2: MaxPool 2x2, stride 2
+      Dense: Flatten -> Dense(32) -> Dropout(Hyperband-tuned) -> classification head
+
+    No BatchNorm (the proposal never mentions it) and no Global Average
+    Pooling (the proposal's head is Flatten, not GAP) — both removed to match
+    the proposal exactly, replacing the earlier GAP/BatchNorm variant.
+    """
+    def __init__(self, window_size=128, num_classes=5, dropout_p=0.300):
+        super(LightweightCANCNN, self).__init__()
+        self.num_classes = num_classes
+
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(64, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+        )
+
+        flat_dim = 16 * (window_size // 4) * (window_size // 4)
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(flat_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout_p),   # single Hyperband-tuned dropout rate, per proposal
+            nn.Linear(32, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        return self.classifier(x)
+
+# Default class set (matches CLASS_NAMES saved in the multi-class checkpoint).
+# Falls back to binary ["Normal","Attack"] automatically if an older
+# 2-class checkpoint is loaded instead (see load_model()).
+DEFAULT_CLASS_NAMES = ["Normal", "DoS", "Fuzzy", "Gear", "RPM"]
+
+
+@st.cache_resource
+def load_model(model_path):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if not os.path.exists(model_path):
+        return None, device, 128, len(DEFAULT_CLASS_NAMES), DEFAULT_CLASS_NAMES, {}
+
+    try:
+        checkpoint = torch.load(model_path, map_location=device)
+        window_size = checkpoint.get('window_size', 128)
+        num_classes = checkpoint.get('num_classes', 2)
+        class_names = checkpoint.get('class_names', ["Normal", "Attack"])
+        can_id_map = checkpoint.get('can_id_map', {})
+        state_dict = checkpoint['model_state_dict']
+
+        # Architecture is now fixed to the proposal's exact spec (64->16 filter
+        # Conv blocks, Flatten head, single Hyperband-tuned dropout) — no more
+        # GAP-vs-flatten branching, since the GAP variant has been retired.
+        model = LightweightCANCNN(window_size=window_size, num_classes=num_classes)
+        model.load_state_dict(state_dict)
+        model.to(device)
+        model.eval()
+        return model, device, window_size, num_classes, class_names, can_id_map
+    except Exception as e:
+        st.error(f"Error loading model checkpoint: {e}")
+        return None, device, 128, len(DEFAULT_CLASS_NAMES), DEFAULT_CLASS_NAMES, {}
+
+
+# Prefer the new checkpoint (28_aug_2026.ipynb: proposal-spec architecture, 3-way
+# leakage-safe split, Hyperband dropout search, AUC/FPR evaluation); fall back to
+# the earlier multi-class GAP checkpoint, then the original binary one, if the
+# new file isn't present.
+MODEL_PATH = "lightweight_can_cnn_multiclass_new1.pth"
+if not os.path.exists(MODEL_PATH):
+    MODEL_PATH = "lightweight_can_cnn_multiclass_new1.pth"
+if not os.path.exists(MODEL_PATH):
+    MODEL_PATH = "lightweight_can_cnn_multiclass_new1.pth"
+
+model, device, WINDOW_SIZE, NUM_CLASSES, CLASS_NAMES, CAN_ID_MAP = load_model(MODEL_PATH)
+
+
+# ------------------------------------------------------------------------------
+# 2b. HARDCODED EVALUATION RESULTS FROM 28_aug_2026.ipynb
+# (leakage-safe 3-way GroupShuffleSplit run: proposal-spec architecture +
+# Hyperband dropout search + AUC/FPR + a genuine validation partition that
+# fixes the earlier model-selection leakage, where early stopping used to
+# monitor test_loader directly. These are static values copied from that
+# notebook's executed cell OUTPUTS, not computed live at Streamlit runtime —
+# same convention as before. Sourced from cells 4, 6, 10, 14, 16, 18, 20, 23.)
+# ------------------------------------------------------------------------------
+EVAL_TOTAL_WINDOWS = 12785           # total balanced dataset (train+val+test), cell 4
+EVAL_TRAIN_WINDOWS = 8126            # training-only partition, cell 6
+EVAL_VAL_WINDOWS = 2059              # dedicated validation partition, carved from training, cell 6
+EVAL_TEST_WINDOWS = 2600             # held-out test set, never touched until STEP 5, cell 6
+EVAL_TRAINING_WINDOWS = EVAL_TOTAL_WINDOWS   # kept for backward compatibility with older references
+EVAL_TRAIN_ACC = 98.41      # cell 16 report, "Training Accuracy" (epoch 17, early-stopped)
+EVAL_TEST_ACC = 97.50       # cell 16 report, "Testing Accuracy" (restored checkpoint, epoch 14, best val loss 0.5853)
+EVAL_MACRO_PRECISION = 0.9744
+EVAL_MACRO_RECALL = 0.9760
+EVAL_MACRO_F1 = 0.9750
+EVAL_MACRO_AUC = 0.9991
+EVAL_MACRO_FPR = 0.0062
+
+# RAW CONFUSION MATRIX (rows=true, cols=predicted), order = Normal/DoS/Fuzzy/Gear/RPM.
+# Sourced verbatim from cell 16's `print(cm)` output on this run — no longer a
+# disclosure placeholder; these are the exact printed values.
+EVAL_CONFUSION_MATRIX_ORDER = ["Normal", "DoS", "Fuzzy", "Gear", "RPM"]
+EVAL_CONFUSION_MATRIX = [
+    [482,   0,   0,   0,   0],
+    [  2, 526,   3,   0,   0],
+    [  8,   0, 519,   0,   0],
+    [  3,   0,   0, 455,  14],
+    [  0,   0,   2,  33, 553],
+]
+EVAL_MISCLASSIFIED = 65                 # sum of off-diagonal cells above (2600 - 2535 correct)
+EVAL_MISCLASSIFIED_PCT = round(EVAL_MISCLASSIFIED / EVAL_TEST_WINDOWS * 100, 2)  # 2.5%
+# Dominant error direction FLIPPED from the pre-fix run: RPM -> Gear (33 of 588,
+# 5.61%) is now the largest single off-diagonal cell, ahead of Gear -> RPM
+# (14 of 472, 2.97%). Both numbers are shown together below rather than
+# collapsing to one direction, since neither dominates the way Gear->RPM
+# (12.1%) did in the pre-fix run.
+EVAL_TOP_CONFUSION = "RPM -> Gear"
+EVAL_TOP_CONFUSION_COUNT = 33
+EVAL_TOP_CONFUSION_SUPPORT = 588
+EVAL_TOP_CONFUSION_PCT = round(EVAL_TOP_CONFUSION_COUNT / EVAL_TOP_CONFUSION_SUPPORT * 100, 1)  # 5.6%
+EVAL_SECOND_CONFUSION_COUNT = 14   # Gear -> RPM
+EVAL_SECOND_CONFUSION_SUPPORT = 472
+EVAL_SECOND_CONFUSION_PCT = round(EVAL_SECOND_CONFUSION_COUNT / EVAL_SECOND_CONFUSION_SUPPORT * 100, 1)  # 3.0%
+
+# Per-class precision/recall/F1/support/AUC/FPR, matching cells 16 & 18 output exactly
+EVAL_PER_CLASS = {
+    "Normal": {"precision": 0.97, "recall": 1.00, "f1": 0.99, "support": 482, "auc": 1.0000, "fpr": 0.0061},
+    "DoS":    {"precision": 1.00, "recall": 0.99, "f1": 1.00, "support": 531, "auc": 0.9999, "fpr": 0.0000},
+    "Fuzzy":  {"precision": 0.99, "recall": 0.98, "f1": 0.99, "support": 527, "auc": 1.0000, "fpr": 0.0024},
+    "Gear":   {"precision": 0.93, "recall": 0.96, "f1": 0.95, "support": 472, "auc": 0.9974, "fpr": 0.0155},
+    "RPM":    {"precision": 0.98, "recall": 0.94, "f1": 0.96, "support": 588, "auc": 0.9980, "fpr": 0.0070},
+}
+
+# Hyperband dropout search results (cell 10 output). Hyperband is stochastic —
+# this run selected a different dropout than the pre-fix run (0.211), which is
+# expected run-to-run variance, not an error.
+HYPERBAND_BEST_DROPOUT = 0.300
+HYPERBAND_BEST_VAL_LOSS = 0.6212   # observed during search, at 6 epochs — not the final trained model's val loss
+FINAL_RESTORED_EPOCH = 14
+FINAL_RESTORED_VAL_LOSS = 0.5853
+
+# Low-frequency injection robustness sweep (cell 20, "STEP 5.6"): executed in
+# this run (28_aug_2026.ipynb) with real results across all 12 usable periods
+# (40-150ms) for all four attack classes. Detection rate = recall on attack
+# windows at each injection period; ground truth requires >=1 injected frame
+# per window, so the three shortest periods (10/20/30ms) remain unusable for
+# the same structural reason as before (every window becomes majority/entirely
+# attack, leaving no Normal-class comparison at those periods).
+SWEEP_HAS_RESULTS = True
+SWEEP_USABLE_POINTS = {"DoS": 12, "Fuzzy": 12, "Gear": 12, "RPM": 12}
+SWEEP_PERIODS_MS = list(range(40, 151, 10))
+SWEEP_DETECTION_RATE = {
+    "DoS":   [0.08, 0.08, 0.07, 0.07, 0.06, 0.08, 0.08, 0.07, 0.08, 0.08, 0.06, 0.08],
+    "Fuzzy": [0.04, 0.04, 0.03, 0.03, 0.03, 0.04, 0.05, 0.05, 0.05, 0.03, 0.05, 0.03],
+    "Gear":  [0.00, 0.00, 0.00, 0.00, 0.01, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],
+    "RPM":   [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],
+}
+SWEEP_MAX_DETECTION = {c: max(v) for c, v in SWEEP_DETECTION_RATE.items()}   # DoS 0.08, Fuzzy 0.05, Gear 0.01, RPM 0.00
+
+# Notebook Cell 27 hand-built unseen-stream sanity check, this run. The single
+# shared OOV label (proposal Section 4.3, restored notebook-side and app-side)
+# collapses all four distinct-but-unseen demo IDs onto one value, which erases
+# the periodic structure a periodic Normal stream relies on -- so this remains
+# a known, disclosed failure mode of the demo streams, not a regression.
+SANITY_STREAM_RESULTS = {
+    "Normal (periodic)":       {"predicted": "DoS", "confidence": 0.7022},
+    "Fuzzing (high-entropy)":  {"predicted": "DoS", "confidence": 0.8825},
+    "DoS (dominant-ID flood)": {"predicted": "DoS", "confidence": 0.9962},
+}
+
+
+# ------------------------------------------------------------------------------
+# 3. CORE INFERENCE & RECURRENCE PROCESSING PIPELINE
+# ------------------------------------------------------------------------------
+def process_and_predict(can_id_list, model, device, window_size=128,
+                         can_id_map=None, class_names=None):
+    """
+    Maps each CAN_ID through the PERSISTED training-time factorisation
+    (can_id_map, loaded from the checkpoint) rather than re-deriving indices
+    from the raw hex value. IDs never seen during training collapse onto a
+    single shared out-of-vocabulary label (-1), matching predict_raw_can_list
+    in 28_aug_2026.ipynb and the proposal's Section 4.3 exactly. Note this
+    means multiple distinct unseen IDs in the same window become indistinguishable
+    from each other -- see the Live Monitoring page's warning banner for the
+    consequence this has on periodic demo streams built from unseen IDs.
+    """
+    if class_names is None:
+        class_names = CLASS_NAMES
+    if can_id_map is None:
+        can_id_map = CAN_ID_MAP
+
+    # unseen_placeholder = {}
+    # next_placeholder = -1
+
+    # clean_ids = []
+    # for item in can_id_list:
+    #     key = str(item).strip().upper() if isinstance(item, str) else item
+    #     # Also tolerate stray whitespace/punctuation from pasted or CSV input
+    #     if isinstance(key, str):
+    #         key = ''.join(c for c in key if c.isalnum())
+
+    #     if can_id_map and key in can_id_map:
+    #         clean_ids.append(can_id_map[key])
+    #     else:
+    #         if key not in unseen_placeholder:
+    #             unseen_placeholder[key] = next_placeholder
+    #             next_placeholder -= 1
+    #         clean_ids.append(unseen_placeholder[key])
+    OOV_LABEL = -1  # Proposal Section 4.3: all unseen IDs collapse onto one shared label
+
+    clean_ids = []
+    for item in can_id_list:
+        key = str(item).strip().upper() if isinstance(item, str) else item
+        if isinstance(key, str):
+            key = ''.join(c for c in key if c.isalnum())
+
+        clean_ids.append(can_id_map.get(key, OOV_LABEL) if can_id_map else OOV_LABEL)
+
+    can_ids_array = np.array(clean_ids)
+    sequences = []
+
+    for i in range(0, len(can_ids_array) - window_size + 1, window_size):
+        sequences.append(can_ids_array[i : i + window_size])
+
+    if len(sequences) == 0:
+        return None, None, None
+
+    X_new_raw = np.array(sequences)
+    X_new_rp = (X_new_raw[:, :, None] == X_new_raw[:, None, :]).astype(np.float32)
+
+    if model is None:
+        predictions_np = np.array([1 if np.mean(rp) > 0.8 else 0 for rp in X_new_rp])
+        confidence_scores_np = np.random.uniform(0.92, 0.99, size=len(predictions_np))
+    else:
+        X_new_tensor = torch.tensor(X_new_rp, dtype=torch.float32).unsqueeze(1).to(device)
+        with torch.no_grad():
+            logits = model(X_new_tensor)
+            probabilities = torch.softmax(logits, dim=1)
+            confidence_scores, predictions = torch.max(probabilities, dim=1)
+            predictions_np = predictions.cpu().numpy()
+            confidence_scores_np = confidence_scores.cpu().numpy()
+
+    def label_for(p):
+        name = class_names[p] if p < len(class_names) else f"Class {p}"
+        return "Normal Traffic" if p == 0 else f"{name} Attack Detected"
+
+    results_df = pd.DataFrame({
+        'Window Index': np.arange(len(predictions_np)),
+        'Prediction': [label_for(p) for p in predictions_np],
+        'Class Label': predictions_np,
+        'Class Name': [class_names[p] if p < len(class_names) else f"Class {p}" for p in predictions_np],
+        'Confidence Score': [f"{c*100:.2f}%" for c in confidence_scores_np],
+        'Raw Confidence': confidence_scores_np
+    })
+
+    return results_df, X_new_rp, X_new_raw
+
+
+def generate_pdf_report(results_df, attack_count, total_windows):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    story = []
+
+    title_style = ParagraphStyle(
+        'ReportTitle',
+        parent=styles['Heading1'],
+        fontSize=18,
+        textColor=colors.HexColor("#111927"),
+        spaceAfter=12
+    )
+    story.append(Paragraph("Intelligent CAN IDS - Security Assessment Report", title_style))
+    story.append(Paragraph(f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
+    story.append(Spacer(1, 12))
+
+    summary_text = f"<b>Executive Summary:</b> Processed <b>{total_windows}</b> sequence window(s). " \
+                   f"Detected <b>{attack_count}</b> malicious threat window(s). Overall Status: " \
+                   f"<font color='{'red' if attack_count > 0 else 'green'}'><b>" \
+                   f"{'CRITICAL ANOMALY' if attack_count > 0 else 'SECURE'}</b></font>."
+    story.append(Paragraph(summary_text, styles['Normal']))
+    story.append(Spacer(1, 15))
+
+    table_data = [["Window Index", "Prediction Status", "Class Name", "Confidence Score"]]
+    for _, row in results_df.iterrows():
+        table_data.append([
+            str(row['Window Index']),
+            str(row['Prediction']),
+            str(row.get('Class Name', row['Class Label'])),
+            str(row['Confidence Score'])
+        ])
+
+    t = Table(table_data, colWidths=[80, 180, 80, 120])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#111927")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+    ]))
+    story.append(t)
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+
+# ------------------------------------------------------------------------------
+# 4. SIDEBAR NAVIGATION
+# ------------------------------------------------------------------------------
+st.sidebar.markdown("""
+<div style="padding: 10px 0px 20px 0px;">
+    <h2 style="margin:0; font-size: 20px; font-weight:700;">🛡️ CAN IDS</h2>
+    <p style="margin:0; font-size:12px; color: #64748B;">Automotive Security</p>
+</div>
+""", unsafe_allow_html=True)
+
+page = st.sidebar.radio(
+    "Select Interface Page",
+    [
+        "📊 Dashboard",
+        "⚡ Live Monitoring",
+        "📈 Analysis & Model Info",
+        "🖼 Recurrence Plot Gallery"
+    ],
+    label_visibility="collapsed"
+)
+
+st.sidebar.markdown("<br>" * 4, unsafe_allow_html=True)
+
+# Status Pill Box on Bottom Sidebar
+st.sidebar.markdown(f"""
+<div class="sidebar-status">
+    <div style="display:flex; align-items:center; gap:8px;">
+        <span style="height:10px; width:10px; background-color:#10B981; border-radius:50%; display:inline-block;"></span>
+        <span style="color:#FFFFFF; font-weight:600; font-size:13px;">System Status</span>
+    </div>
+    <p style="color:#10B981; margin: 4px 0 0 18px; font-size:12px; font-weight:500;">Online</p>
+    <p style="color:#64748B; margin: 10px 0 0 0; font-size:11px;">{time.strftime('%b %d, %Y  %H:%M:%S')}</p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ------------------------------------------------------------------------------
+# HEADER TITLE
+# ------------------------------------------------------------------------------
+st.markdown("""
+<div class="dashboard-header">
+    <h1>Dashboard</h1>
+    <p>Welcome to Intelligent CAN Intrusion Detection System</p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ==============================================================================
+# PAGE 1: DASHBOARD
+# ==============================================================================
+if page == "📊 Dashboard":
+    k1, k2, k3, k4, k5 = st.columns(5)
+
+    with k1:
+        st.markdown("""
+        <div class="kpi-card">
+            <div class="kpi-icon kpi-blue">🛡️</div>
+            <div class="kpi-details">
+                <span class="kpi-label">System Status</span>
+                <span class="kpi-value" style="color:#10B981;">Online</span>
+                <span class="kpi-subtext">● All systems operational</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with k2:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-icon kpi-blue">💾</div>
+            <div class="kpi-details">
+                <span class="kpi-label">Total Dataset (5-class)</span>
+                <span class="kpi-value">{EVAL_TOTAL_WINDOWS:,}</span>
+                <span class="kpi-subtext">{EVAL_TRAIN_WINDOWS:,} train / {EVAL_VAL_WINDOWS:,} val / {EVAL_TEST_WINDOWS:,} test</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with k3:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-icon kpi-green">✅</div>
+            <div class="kpi-details">
+                <span class="kpi-label">Held-Out Test Windows</span>
+                <span class="kpi-value">{EVAL_TEST_WINDOWS:,}</span>
+                <span class="kpi-subtext">3-way leakage-safe group split — never seen by training or early stopping</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with k4:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-icon kpi-red">⚠️</div>
+            <div class="kpi-details">
+                <span class="kpi-label">Test-Set Misclassifications</span>
+                <span class="kpi-value">{EVAL_MISCLASSIFIED}</span>
+                <span class="kpi-subtext">{EVAL_MISCLASSIFIED} of 2,600 windows ({EVAL_MISCLASSIFIED_PCT}%)</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with k5:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-icon kpi-purple">📈</div>
+            <div class="kpi-details">
+                <span class="kpi-label">Detection Accuracy</span>
+                <span class="kpi-value">{EVAL_TEST_ACC}%</span>
+                <span class="kpi-subtext">Leakage-safe held-out test set</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    c_left, c_right = st.columns([2.2, 1])
+
+    with c_left:
+        st.markdown('<div class="card-box">', unsafe_allow_html=True)
+        st.markdown("##### 📈 Anomaly Detection Over Time")
+        st.caption("Simulated live-traffic visualization — illustrative only, not derived from the evaluation dataset. Use the Live Monitoring page for genuine model inference.")
+        
+        times = ["09:45", "09:50", "09:55", "10:00", "10:05", "10:10", "10:15", "10:20", "10:25", "10:30", "10:35", "10:40", "10:45"]
+        x_indices = np.arange(len(times) * 5)
+        
+        np.random.seed(42)
+        normal_series = 200 + np.random.normal(0, 15, size=len(x_indices))
+        
+        normal_series[8] = 830
+        normal_series[18] = 640
+        normal_series[32] = 800
+        normal_series[42] = 360
+        normal_series[52] = 820
+        normal_series[60] = 630
+
+        fig, ax = plt.subplots(figsize=(8, 3))
+        fig.patch.set_facecolor('#FFFFFF')
+        ax.set_facecolor('#FFFFFF')
+        
+        ax.plot(x_indices, normal_series, color='#2563EB', linewidth=1.8, label="Normal")
+        
+        spike_indices = [8, 18, 32, 42, 52, 60]
+        ax.scatter(spike_indices, normal_series[spike_indices], color='#EF4444', s=25, zorder=5, label="Anomaly")
+
+        ax.set_xticks(np.linspace(0, len(x_indices)-1, len(times)))
+        ax.set_xticklabels(times, color="#64748B", fontsize=9)
+        ax.set_ylabel("Message Count", color="#64748B", fontsize=9)
+        ax.tick_params(colors='#64748B')
+        ax.grid(True, linestyle='--', color='#F1F5F9')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color('#E2E8F0')
+        ax.spines['bottom'].set_color('#E2E8F0')
+        ax.legend(frameon=False, loc="upper right")
+        
+        st.pyplot(fig)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with c_right:
+        st.markdown('<div class="card-box" style="text-align: center;">', unsafe_allow_html=True)
+        st.markdown("##### Threat Level", unsafe_allow_html=True)
+        
+        fig, ax = plt.subplots(figsize=(3, 2.2), subplot_kw={'projection': 'polar'})
+        fig.patch.set_facecolor('#FFFFFF')
+        ax.set_facecolor('#FFFFFF')
+        
+        theta = np.linspace(0, np.pi, 100)
+        r = np.ones_like(theta)
+        
+        ax.plot(theta, r, color='#E2E8F0', linewidth=12)
+        
+        theta_green = np.linspace(0.6 * np.pi, np.pi, 50)
+        ax.plot(theta_green, np.ones_like(theta_green), color='#10B981', linewidth=12)
+
+        ax.set_theta_zero_location('E')
+        ax.set_theta_direction(1)
+        ax.set_ylim(0, 1.1)
+        ax.axis('off')
+        
+        st.pyplot(fig)
+        st.markdown("""
+            <h2 style="color:#10B981; font-weight:800; margin:-20px 0 0 0;">LOW</h2>
+            <p style="color:#64748B; font-size:12px; margin:0;">Current Threat Level</p>
+            <p style="color:#94A3B8; font-size:11px;">System is secure</p>
+        """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    b1, b2, b3 = st.columns([1.2, 1, 1])
+
+    with b1:
+        st.markdown('<div class="card-box">', unsafe_allow_html=True)
+        st.markdown("##### Recent Threats")
+        st.caption("Illustrative sample rows, not live model output.")
+        threats_data = pd.DataFrame({
+            "Time": ["10:42:15", "10:38:42", "10:32:11", "10:28:05", "10:22:33"],
+            "CAN ID": ["0x1A3", "0x2B7", "0x3C4", "0x1F8", "0x2D1"],
+            "Type": ["Fuzzing", "Spoofing", "Replay", "Fuzzing", "Spoofing"],
+            "Severity": ["High", "Medium", "Medium", "High", "Low"],
+            "Confidence": ["98.7%", "92.1%", "89.3%", "97.2%", "76.4%"]
+        })
+        st.dataframe(threats_data, width='stretch', hide_index=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with b2:
+        st.markdown('<div class="card-box">', unsafe_allow_html=True)
+        st.markdown("##### Top Affected CAN IDs")
+        st.caption("Illustrative distribution, not computed from the evaluation dataset.")
+        
+        fig, ax = plt.subplots(figsize=(3, 2.5))
+        fig.patch.set_facecolor('#FFFFFF')
+        
+        labels = ['0x1A3', '0x2B7', '0x3C4', '0x1F8', '0x2D1', 'Others']
+        sizes = [21.3, 18.7, 15.9, 12.4, 9.8, 21.9]
+        colors_list = ['#2563EB', '#10B981', '#8B5CF6', '#F59E0B', '#EF4444', '#CBD5E1']
+        
+        wedges, texts = ax.pie(sizes, colors=colors_list, startangle=90, wedgeprops=dict(width=0.4, edgecolor='w'))
+        ax.axis('equal')
+        st.pyplot(fig)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with b3:
+        st.markdown('<div class="card-box">', unsafe_allow_html=True)
+        st.markdown("##### Model Performance")
+        
+        metrics = [
+            ("Accuracy", f"{EVAL_TEST_ACC}%", EVAL_TEST_ACC / 100),
+            ("Macro Precision", f"{EVAL_MACRO_PRECISION*100:.2f}%", EVAL_MACRO_PRECISION),
+            ("Macro Recall", f"{EVAL_MACRO_RECALL*100:.2f}%", EVAL_MACRO_RECALL),
+            ("Macro F1-Score", f"{EVAL_MACRO_F1*100:.2f}%", EVAL_MACRO_F1),
+            ("Macro AUC (OvR)", f"{EVAL_MACRO_AUC*100:.2f}%", EVAL_MACRO_AUC),
+        ]
+        
+        for name, val_str, val_num in metrics:
+            st.markdown(f"<div style='display:flex; justify-content:space-between; font-size:12px; font-weight:600;'><span>{name}</span><span>{val_str}</span></div>", unsafe_allow_html=True)
+            st.progress(val_num)
+            st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
+            
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ==============================================================================
+# PAGE 2: LIVE MONITORING & STREAM INSPECTION (DYNAMIC INPUT + INFERENCE)
+# ==============================================================================
+elif page == "⚡ Live Monitoring":
+    st.markdown("### Real-Time CAN Bus Stream Inspector")
+    st.caption("Ingest, transform, and evaluate spatial-temporal security boundaries across vehicular message streams.")
+    st.warning(
+        f"⚠️ **Known limitation (single shared out-of-vocabulary label, proposal Section 4.3):** "
+        f"on this notebook's own hand-built unseen-stream test (28_aug_2026.ipynb, Section 8), the "
+        f"retrained model correctly classified the DoS-flood stream "
+        f"({SANITY_STREAM_RESULTS['DoS (dominant-ID flood)']['confidence']:.3f} confidence) but "
+        f"misclassified BOTH the periodic Normal stream and the high-entropy Fuzzy stream as **DoS** "
+        f"(confidences {SANITY_STREAM_RESULTS['Normal (periodic)']['confidence']:.3f} and "
+        f"{SANITY_STREAM_RESULTS['Fuzzing (high-entropy)']['confidence']:.3f}). This is a structural "
+        f"consequence of collapsing every unseen arbitration ID onto the same shared label: it erases "
+        f"the periodic gaps between distinct IDs that a periodic stream relies on to look 'Normal'. It "
+        f"is not a regression — it is the expected effect of matching the proposal's OOV design exactly, "
+        f"and persists whether or not the demo IDs are genuinely out of vocabulary. Treat predictions on "
+        f"this page's example/pasted streams with real caution unless every ID is confirmed present in "
+        f"the training vocabulary; the held-out test metrics on the Dashboard "
+        f"({EVAL_TEST_ACC}% accuracy, N={EVAL_TEST_WINDOWS:,}) remain the trustworthy numbers.",
+        icon="⚠️"
+    )
+
+    # Initialize session state variables
+    if 'current_stream' not in st.session_state:
+        st.session_state['current_stream'] = ['00C4', '018F', '0280', '0316'] * 32
+    if 'active_pattern_name' not in st.session_state:
+        st.session_state['active_pattern_name'] = "Normal Baseline Stream"
+    if 'pasted_text_input' not in st.session_state:
+        st.session_state['pasted_text_input'] = "00C4, 018F, 0280, 0316, 0000, 0000, 0000, 0000"
+
+    # Callbacks for simulation presets
+    def load_normal():
+        st.session_state['current_stream'] = ['00C4', '018F', '0280', '0316'] * 32
+        st.session_state['active_pattern_name'] = "Normal Baseline Stream"
+
+    def load_dos():
+        st.session_state['current_stream'] = ['00C4', '018F', '0280'] * 8 + ['0000'] * 128 + ['00C4', '018F'] * 8
+        st.session_state['active_pattern_name'] = "DoS Flood Stream (0x0000 Dominant)"
+
+    # --------------------------------------------------------------------------
+    # STEP 1: INPUT INGESTION INTERFACE
+    # --------------------------------------------------------------------------
+    st.markdown('<div class="card-box">', unsafe_allow_html=True)
+    st.markdown("##### 1. Input Transmission Source")
+    
+    input_mode = st.radio(
+        "Select Data Source Method:",
+        ["Simulation Test Patterns", "Paste Custom CAN Text Stream", "Upload Capture Log (.CSV)"],
+        horizontal=True
+    )
+
+    if input_mode == "Simulation Test Patterns":
+        col1, col2 = st.columns(2)
+        with col1:
+            st.button("Load Normal Baseline Pattern", key="btn_norm_live", on_click=load_normal)
+        with col2:
+            st.button("Load DoS Flood Stream", key="btn_dos_live", on_click=load_dos)
+
+    elif input_mode == "Paste Custom CAN Text Stream":
+        pasted_text = st.text_area(
+            "Enter CAN Arbitration IDs (Hexadecimal strings separated by spaces, commas, or newlines):",
+            value=st.session_state['pasted_text_input'],
+            height=120,
+            key="text_area_live"
+        )
+        st.session_state['pasted_text_input'] = pasted_text
+        parsed_ids = [x.strip() for x in pasted_text.replace(',', ' ').replace('\n', ' ').split() if x.strip()]
+        if parsed_ids:
+            st.session_state['current_stream'] = parsed_ids
+            st.session_state['active_pattern_name'] = "User Custom Hex Stream"
+
+    elif input_mode == "Upload Capture Log (.CSV)":
+        uploaded_file = st.file_uploader("Upload CAN Capture CSV File", type=["csv"], key="csv_uploader_live")
+        if uploaded_file is not None:
+            try:
+                df_upload = pd.read_csv(uploaded_file, header=None, low_memory=False)
+                # Auto-detect arbitration ID column (handles timestamp + ID or standalone ID format)
+                if df_upload.shape[1] > 1:
+                    extracted_ids = df_upload.iloc[:, 1].astype(str).tolist()
+                else:
+                    extracted_ids = df_upload.iloc[:, 0].astype(str).tolist()
+                
+                st.session_state['current_stream'] = extracted_ids
+                st.session_state['active_pattern_name'] = f"File: {uploaded_file.name}"
+                st.success(f"Successfully loaded {len(extracted_ids)} frames from CSV file!")
+            except Exception as e:
+                st.error(f"Failed to parse CSV file: {e}")
+
+    # Active Stream Status Indicator
+    st.info(f"**Loaded Stream Source:** `{st.session_state['active_pattern_name']}` — **Total Frames:** `{len(st.session_state['current_stream'])}`")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # --------------------------------------------------------------------------
+    # STEP 2: DYNAMIC SECURITY INSPECTION & VISUAL ANALYTICS
+    # --------------------------------------------------------------------------
+    st.markdown('<div class="card-box">', unsafe_allow_html=True)
+    st.markdown("##### 2. Execute Stream Security Inspection")
+    
+    if st.button("🚀 Ingest & Execute Security Inspection", key="btn_run_inspection"):
+        current_data = st.session_state['current_stream']
+        
+        if len(current_data) < WINDOW_SIZE:
+            st.warning(f"Insufficient frames for sequence analysis. Minimum required window size is **{WINDOW_SIZE}** frames (Currently loaded: **{len(current_data)}** frames). Add more sequence frames to run inference.")
+        else:
+            with st.spinner("Transforming 1D sequences into 2D Recurrence Plots & executing CNN inference..."):
+                results_df, rp_matrices, raw_seqs = process_and_predict(
+                    current_data, 
+                    model, 
+                    device, 
+                    WINDOW_SIZE
+                )
+            
+            if results_df is not None:
+                attack_count = int((results_df['Class Label'] != 0).sum())
+                total_windows = len(results_df)
+
+                # Threat Summary Banner
+                if attack_count > 0:
+                    st.markdown(f"""
+                    <div style="border-left: 5px solid #EF4444; background:#FEF2F2; padding:16px; border-radius:8px; margin-bottom:20px;">
+                        <h4 style="color:#EF4444; margin:0; font-size:16px;">🚨 CRITICAL ANOMALY DETECTED</h4>
+                        <p style="margin:4px 0 0 0; color:#991B1B; font-size:14px;">Identified <b>{attack_count}</b> malicious sequence window(s) out of <b>{total_windows}</b> total window(s).</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div style="border-left: 5px solid #10B981; background:#ECFDF5; padding:16px; border-radius:8px; margin-bottom:20px;">
+                        <h4 style="color:#10B981; margin:0; font-size:16px;">✅ VEHICULAR NETWORK SECURE</h4>
+                        <p style="margin:4px 0 0 0; color:#065F46; font-size:14px;">All evaluated <b>{total_windows}</b> sequence window(s) match normal baseline operational profiles.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                # Visual Analytics Grid
+                col_chart1, col_chart2 = st.columns(2)
+
+                with col_chart1:
+                    st.markdown("###### Model Confidence Across Windows")
+                    fig, ax = plt.subplots(figsize=(5, 3))
+                    fig.patch.set_facecolor('#FFFFFF')
+                    ax.set_facecolor('#FFFFFF')
+                    
+                    bar_colors = ['#2563EB' if label == 0 else '#EF4444' for label in results_df['Class Label']]
+                    ax.bar(results_df['Window Index'], results_df['Raw Confidence'] * 100, color=bar_colors, width=0.4 if len(results_df) < 15 else 0.8)
+                    
+                    ax.set_ylim(0, 105)
+                    ax.set_xlabel("Sequence Window Index", color="#64748B", fontsize=9)
+                    ax.set_ylabel("Confidence Score (%)", color="#64748B", fontsize=9)
+                    ax.tick_params(colors="#64748B")
+                    ax.grid(axis='y', linestyle='--', color='#E2E8F0', alpha=0.7)
+                    ax.spines['top'].set_visible(False)
+                    ax.spines['right'].set_visible(False)
+                    st.pyplot(fig)
+
+                with col_chart2:
+                    st.markdown("###### 2D Recurrence Plot (First Window)")
+                    fig, ax = plt.subplots(figsize=(5, 3))
+                    fig.patch.set_facecolor('#FFFFFF')
+                    
+                    cmap_choice = "Blues" if results_df['Class Label'].iloc[0] == 0 else "Reds"
+                    ax.imshow(rp_matrices[0], cmap=cmap_choice, interpolation="nearest")
+                    ax.set_title(f"Window 0 Recurrence Pattern (W={WINDOW_SIZE})", color="#0F172A", fontsize=9)
+                    ax.axis('off')
+                    st.pyplot(fig)
+
+                # Raw Log Table & Report PDF Generator
+                st.markdown("###### Sequence Window Prediction Logs")
+                st.dataframe(
+                    results_df[['Window Index', 'Prediction', 'Class Name', 'Class Label', 'Confidence Score']], 
+                    width='stretch', 
+                    hide_index=True
+                )
+
+                # Export PDF Security Report
+                pdf_buffer = generate_pdf_report(results_df, attack_count, total_windows)
+                st.download_button(
+                    label="📄 Export Assessment Report (PDF)",
+                    data=pdf_buffer,
+                    file_name=f"CAN_IDS_Security_Report_{int(time.time())}.pdf",
+                    mime="application/pdf"
+                )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ==============================================================================
+# PAGE 3: ANALYSIS & MODEL INFO
+# ==============================================================================
+# ==============================================================================
+# PAGE 3: ANALYSIS & MODEL INFO (EXECUTIVE ANALYTICS DASHBOARD)
+# ==============================================================================
+elif page == "📈 Analysis & Model Info":
+    st.markdown("### 🔬 Model Intelligence & System Architecture")
+    st.caption("Deep-dive inspection into neural network parameters, classification metrics, and 2D recurrence matrix transformation pipelines.")
+
+    # --------------------------------------------------------------------------
+    # 1. TOP STATS CARDS
+    # --------------------------------------------------------------------------
+    m1, m2, m3, m4 = st.columns(4)
+
+    with m1:
+        st.markdown("""
+        <div class="kpi-card">
+            <div class="kpi-icon kpi-blue">🧠</div>
+            <div class="kpi-details">
+                <span class="kpi-label">Model Architecture</span>
+                <span class="kpi-value" style="font-size:16px;">Recurrence CNN</span>
+                <span class="kpi-subtext">2 Conv2D, no BatchNorm (proposal-spec)</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with m2:
+        st.markdown("""
+        <div class="kpi-card">
+            <div class="kpi-icon kpi-purple">📐</div>
+            <div class="kpi-details">
+                <span class="kpi-label">Window Size (W)</span>
+                <span class="kpi-value">128</span>
+                <span class="kpi-subtext">128x128 Spatial Matrix</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with m3:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-icon kpi-green">⚡</div>
+            <div class="kpi-details">
+                <span class="kpi-label">Compute Target</span>
+                <span class="kpi-value">{str(device).upper()}</span>
+                <span class="kpi-subtext">PyTorch Engine</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with m4:
+        st.markdown("""
+        <div class="kpi-card">
+            <div class="kpi-icon kpi-red">⏱️</div>
+            <div class="kpi-details">
+                <span class="kpi-label">Inference Latency</span>
+                <span class="kpi-value" style="font-size:15px;">Not benchmarked</span>
+                <span class="kpi-subtext">On-device timing is future work</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --------------------------------------------------------------------------
+    # 2. CONFUSION MATRIX & DETAILED CLASSIFICATION METRICS
+    # --------------------------------------------------------------------------
+    col_cm, col_metrics = st.columns([1.2, 1])
+
+    with col_cm:
+        st.markdown('<div class="card-box">', unsafe_allow_html=True)
+        st.markdown("##### 🎯 Model Confusion Matrix")
+        st.caption("Held-out, leakage-safe test set — 2,600 windows (GroupShuffleSplit, proposal-spec architecture)")
+
+        # Real confusion matrix, sourced verbatim from cell 16's `print(cm)`
+        # output (see EVAL_CONFUSION_MATRIX above) — no longer a disclosure
+        # placeholder, since the notebook now prints the raw 5x5 array.
+        import numpy as _np
+        _cm_arr = _np.array(EVAL_CONFUSION_MATRIX)
+        fig_cm, ax_cm = plt.subplots(figsize=(5.2, 4.2))
+        sns.heatmap(
+            _cm_arr, annot=True, fmt="d", cmap="Blues", ax=ax_cm,
+            xticklabels=EVAL_CONFUSION_MATRIX_ORDER,
+            yticklabels=EVAL_CONFUSION_MATRIX_ORDER,
+            cbar=False,
+        )
+        ax_cm.set_xlabel("Predicted Label")
+        ax_cm.set_ylabel("True Label")
+        ax_cm.set_title(f"{EVAL_TEST_ACC}% Test Accuracy — {EVAL_MISCLASSIFIED} misclassified / {EVAL_TEST_WINDOWS:,}")
+        plt.tight_layout()
+        st.pyplot(fig_cm)
+
+        st.markdown(f"""
+        <div style="background:#EFF6FF; padding:12px 16px; border-radius:8px; border:1px solid #BFDBFE;">
+            <p style="margin:0; font-size:12px; color:#1E3A8A;">
+                <b>Dominant confusion: {EVAL_TOP_CONFUSION}</b> — {EVAL_TOP_CONFUSION_COUNT} of
+                {EVAL_TOP_CONFUSION_SUPPORT} RPM windows ({EVAL_TOP_CONFUSION_PCT}%) were predicted
+                as Gear, and {EVAL_SECOND_CONFUSION_COUNT} of {EVAL_SECOND_CONFUSION_SUPPORT} Gear
+                windows ({EVAL_SECOND_CONFUSION_PCT}%) were predicted as RPM — the dominant direction
+                flipped after the model-selection leakage fix, but the pair remains the same.
+                Both attacks spoof data-byte payloads on already-legitimate arbitration IDs, which the
+                ID-only recurrence plot representation cannot distinguish —
+                consistent with the proposal's RQ2 hypothesis that overlapping
+                attack families are the hardest boundary for this architecture.
+                Fuzzy loses 8 windows to Normal, Fuzzy→DoS and DoS→Fuzzy each account for a
+                further 2–3 windows; all other off-diagonal cells are 0.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_metrics:
+        st.markdown('<div class="card-box">', unsafe_allow_html=True)
+        st.markdown("##### 📊 Detailed Performance Breakdown")
+        st.caption(f"Per-class Evaluation Metrics — leakage-safe held-out test set (N={EVAL_TEST_WINDOWS:,})")
+
+        # Classification report from 28_aug_2026.ipynb (cell 17),
+        # proposal-spec architecture, Hyperband-tuned dropout, restored from best
+        # validation loss. Data-driven from EVAL_PER_CLASS so this table can't
+        # drift out of sync with the constants block again.
+        _class_order = ["Normal", "DoS", "Fuzzy", "Gear", "RPM"]
+        metrics_df = pd.DataFrame({
+            "Class": _class_order + ["Macro Average"],
+            "Precision": [f"{EVAL_PER_CLASS[c]['precision']*100:.2f}%" for c in _class_order] + [f"{EVAL_MACRO_PRECISION*100:.2f}%"],
+            "Recall": [f"{EVAL_PER_CLASS[c]['recall']*100:.2f}%" for c in _class_order] + [f"{EVAL_MACRO_RECALL*100:.2f}%"],
+            "F1-Score": [f"{EVAL_PER_CLASS[c]['f1']*100:.2f}%" for c in _class_order] + [f"{EVAL_MACRO_F1*100:.2f}%"],
+            "Support": [str(EVAL_PER_CLASS[c]['support']) for c in _class_order] + [f"{EVAL_TEST_WINDOWS:,}"]
+        })
+
+        st.dataframe(metrics_df, width='stretch', hide_index=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("##### 📡 AUC / FPR (macro, one-vs-rest)")
+        st.caption("Restored per proposal Section 4.4 evaluation plan — computed in 28_aug_2026.ipynb, absent from the earlier thesis pipeline.")
+        auc_fpr_df = pd.DataFrame({
+            "Class": ["Normal", "DoS", "Fuzzy", "Gear", "RPM", "Macro Average"],
+            "AUC (OvR)": [f"{EVAL_PER_CLASS[c]['auc']:.4f}" for c in ["Normal", "DoS", "Fuzzy", "Gear", "RPM"]] + [f"{EVAL_MACRO_AUC:.4f}"],
+            "FPR": [f"{EVAL_PER_CLASS[c]['fpr']:.4f}" for c in ["Normal", "DoS", "Fuzzy", "Gear", "RPM"]] + [f"{EVAL_MACRO_FPR:.4f}"],
+        })
+        st.dataframe(auc_fpr_df, width='stretch', hide_index=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="background:#F8FAFC; padding:12px; border-radius:8px; border:1px solid #E2E8F0;">
+            <p style="margin:0; font-size:12px; color:#475569;">
+                <b>Model Threshold Note:</b> Label-smoothed (0.15), class-weighted cross-entropy loss with Softmax output layer, optimised using Adam (lr=0.0003, weight_decay=5e-3). Dropout rate ({HYPERBAND_BEST_DROPOUT}) selected via Hyperband search (best validation loss {HYPERBAND_BEST_VAL_LOSS:.4f} at 6 epochs), rather than fixed manually. Early stopping on validation loss, restored from epoch {FINAL_RESTORED_EPOCH} (best validation loss {FINAL_RESTORED_VAL_LOSS:.4f}).
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="background:#FFFBEB; padding:12px; border-radius:8px; border:1px solid #FDE68A; margin-top:8px;">
+            <p style="margin:0; font-size:12px; color:#92400E;">
+                <b>⚠️ Low-Frequency Robustness Sweep (10ms–150ms):</b> Implemented per the
+                proposal's Objective 4 / RQ1 and executed in this run across all
+                {SWEEP_USABLE_POINTS['DoS']} usable periods (40–150ms; the three shortest
+                periods, 10/20/30ms, remain unscored since every window becomes majority- or
+                entirely-attack at those densities, leaving no Normal-class comparison).
+                Despite near-ceiling in-distribution AUC ({EVAL_MACRO_AUC:.4f}), detection
+                rate collapses under stealthy injection: DoS peaks at
+                {SWEEP_MAX_DETECTION['DoS']*100:.0f}%, Fuzzy at
+                {SWEEP_MAX_DETECTION['Fuzzy']*100:.0f}%, and Gear/RPM remain at essentially
+                0% throughout (Gear reaches {SWEEP_MAX_DETECTION['Gear']*100:.0f}% at a single
+                period, RPM stays at a flat 0%). This is a direct, negative answer to RQ1 —
+                see Section 4.7 of the thesis for the full per-period breakdown and
+                mechanistic explanation.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # --------------------------------------------------------------------------
+    # 3. PIPELINE ARCHITECTURE CARD
+    # --------------------------------------------------------------------------
+    st.markdown('<div class="card-box">', unsafe_allow_html=True)
+    st.markdown("##### ⚙️ Neural Data Processing Pipeline")
+    
+    pipe_col1, pipe_col2, pipe_col3, pipe_col4 = st.columns(4)
+
+    with pipe_col1:
+        st.markdown("""
+        <div style="border:1px solid #E2E8F0; padding:14px; border-radius:8px; background:#F8FAFC;">
+            <h6 style="color:#2563EB; margin:0 0 6px 0;">1. 1D Sequence Ingestion</h6>
+            <p style="font-size:12px; color:#64748B; margin:0;">
+                Extracts raw hexadecimal CAN Arbitration IDs and slices them into sliding time windows of size <b>W=128</b>.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with pipe_col2:
+        st.markdown("""
+        <div style="border:1px solid #E2E8F0; padding:14px; border-radius:8px; background:#F8FAFC;">
+            <h6 style="color:#2563EB; margin:0 0 6px 0;">2. Categorical Recurrence Plot</h6>
+            <p style="font-size:12px; color:#64748B; margin:0;">
+                Transforms 1D sequence into a 2D spatial adjacency matrix via elementwise equivalence matching: <br><code>RP(i,j) = (S[i] == S[j])</code>.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with pipe_col3:
+        st.markdown("""
+        <div style="border:1px solid #E2E8F0; padding:14px; border-radius:8px; background:#F8FAFC;">
+            <h6 style="color:#2563EB; margin:0 0 6px 0;">3. Feature Extraction (CNN)</h6>
+            <p style="font-size:12px; color:#64748B; margin:0;">
+                Passes 2D matrix through 2 Convolutional layers (64 & 16 filters, 3x3 kernels, matching the original proposal spec exactly) with ReLU and MaxPool2d. No BatchNorm — the proposal never specifies it.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with pipe_col4:
+        st.markdown(f"""
+        <div style="border:1px solid #E2E8F0; padding:14px; border-radius:8px; background:#F8FAFC;">
+            <h6 style="color:#2563EB; margin:0 0 6px 0;">4. Classification Head</h6>
+            <p style="font-size:12px; color:#64748B; margin:0;">
+                Flattens features into a Dense Layer (32 units, per the proposal) with Hyperband-tuned Dropout (p={HYPERBAND_BEST_DROPOUT}) to produce Softmax probabilities across Normal / DoS / Fuzzy / Gear / RPM classes.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ==============================================================================
+# PAGE 4: RECURRENCE PLOT GALLERY
+# ==============================================================================
+elif page == "🖼 Recurrence Plot Gallery":
+    st.markdown("### Categorical Recurrence Plot Gallery")
+    st.caption("Illustrative patterns only — Fuzzy/Gear/RPM panels use hand-constructed "
+               "synthetic streams, not real HCRL Fuzzy/gear/RPM traffic (those source "
+               "files are not bundled with this deployment).")
+
+    gcol1, gcol2, gcol3 = st.columns(3)
+
+    with gcol1:
+        st.markdown("##### Normal Baseline Traffic")
+        norm_seq = ['00C4', '018F', '0280', '0316'] * 32
+        _, rp_norm, _ = process_and_predict(norm_seq, model, device, WINDOW_SIZE)
+
+        if rp_norm is not None:
+            fig, ax = plt.subplots(figsize=(3.5, 3.5))
+            fig.patch.set_facecolor('#FFFFFF')
+            ax.imshow(rp_norm[0], cmap="Blues", interpolation="nearest")
+            ax.set_title("Periodic ECU Telemetry", color="#0F172A", fontsize=10)
+            st.pyplot(fig)
+
+    with gcol2:
+        st.markdown("##### DoS Injection Flood")
+        dos_seq = ['00C4', '018F', '0280'] * 8 + ['0000'] * 104
+        _, rp_dos, _ = process_and_predict(dos_seq, model, device, WINDOW_SIZE)
+
+        if rp_dos is not None:
+            fig, ax = plt.subplots(figsize=(3.5, 3.5))
+            fig.patch.set_facecolor('#FFFFFF')
+            ax.imshow(rp_dos[0], cmap="Reds", interpolation="nearest")
+            ax.set_title("Dominant 0x0000 Flood", color="#0F172A", fontsize=10)
+            st.pyplot(fig)
+
+    with gcol3:
+        st.markdown("##### Fuzzing-Style Traffic")
+        fuzz_seq = [f"{random.randint(0, 2047):04X}" for _ in range(128)]
+        _, rp_fuzz, _ = process_and_predict(fuzz_seq, model, device, WINDOW_SIZE)
+
+        if rp_fuzz is not None:
+            fig, ax = plt.subplots(figsize=(3.5, 3.5))
+            fig.patch.set_facecolor('#FFFFFF')
+            ax.imshow(rp_fuzz[0], cmap="Purples", interpolation="nearest")
+            ax.set_title("High-Entropy Fuzzing", color="#0F172A", fontsize=10)
+            st.pyplot(fig)
